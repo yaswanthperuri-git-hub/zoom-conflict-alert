@@ -3,7 +3,7 @@ import os
 import hmac
 import hashlib
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 
 
@@ -68,7 +68,6 @@ def get_all_scheduled_events(token, host_email):
 
 
 def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id):
-    from datetime import timedelta
     new_end = new_start + timedelta(minutes=new_duration_mins)
     conflicts = []
     for ev in existing_events:
