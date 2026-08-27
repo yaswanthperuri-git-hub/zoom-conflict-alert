@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "api/zoom_webhook.py": {
+      "runtime": "python3.12"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/zoom_webhook",
+      "dest": "/api/zoom_webhook.py"
+    }
+  ]
+}
