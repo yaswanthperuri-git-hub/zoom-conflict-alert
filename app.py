@@ -33,8 +33,11 @@ def get_all_scheduled_events(token, host_email):
     headers = {"Authorization": f"Bearer {token}"}
     events = []
 
+    # Use host_email if available, otherwise fall back to "me"
+    user_id = host_email if host_email and host_email.strip() else "me"
+
     resp = httpx.get(
-        f"https://api.zoom.us/v2/users/{host_email}/meetings",
+        f"https://api.zoom.us/v2/users/{user_id}/meetings",
         headers=headers,
         params={"type": "scheduled", "page_size": 100},
     )
@@ -50,7 +53,7 @@ def get_all_scheduled_events(token, host_email):
                 })
 
     resp = httpx.get(
-        f"https://api.zoom.us/v2/users/{host_email}/webinars",
+        f"https://api.zoom.us/v2/users/{user_id}/webinars",
         headers=headers,
         params={"page_size": 100},
     )
