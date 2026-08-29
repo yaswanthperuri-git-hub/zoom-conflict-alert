@@ -31,7 +31,6 @@ def get_zoom_access_token():
 
 
 def get_host_email(token, event_id, event_type):
-    """Fetch host email directly from meeting/webinar details API."""
     headers = {"Authorization": f"Bearer {token}"}
     if event_type == "webinar.created":
         resp = httpx.get(
@@ -79,7 +78,13 @@ def get_all_scheduled_events(token, host_email):
         params={"page_size": 100},
     )
     if resp.status_code == 200:
-        for w in resp.json().get("webinars", []):
+        raw_webinars = resp.json().get("webinars", [])
+        # DEBUG — print all fetched webinars and their types
+        print(f"DEBUG fetched {len(raw_webinars)} webinars for {user_id}:")
+        for w in raw_webinars:
+            print(f"  - {w.get('topic')} | type={w.get('type')} | start={w.get('start_time')} | duration={w.get('duration')}")
+
+        for w in raw_webinars:
             if w.get("start_time") and w.get("duration"):
                 events.append({
                     "id": w["id"],
@@ -91,23 +96,26 @@ def get_all_scheduled_events(token, host_email):
                     "duration_mins": w["duration"],
                 })
 
+    print(f"DEBUG total events fetched: {len(events)}")
     return events
 
 
 def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, new_is_simulive):
     new_end = new_start + timedelta(minutes=new_duration_mins)
     conflicts = []
+    print(f"DEBUG checking conflicts for new_start={new_start} duration={new_duration_mins} is_simulive={new_is_simulive}")
     for ev in existing_events:
         if str(ev["id"]) == str(new_event_id):
             continue
-
-        # Only ignore if BOTH new and existing are Simulive
         if new_is_simulive and ev.get("is_simulive"):
+            print(f"  SKIP (both simulive): {ev['topic']}")
             continue
-
         ev_end = ev["start"] + timedelta(minutes=ev["duration_mins"])
-        if new_start < ev_end and new_end > ev["start"]:
+        overlaps = new_start < ev_end and new_end > ev["start"]
+        print(f"  CHECK {ev['topic']} | start={ev['start']} end={ev_end} | overlap={overlaps}")
+        if overlaps:
             conflicts.append(ev)
+    print(f"DEBUG conflicts found: {len(conflicts)}")
     return conflicts
 
 
@@ -197,10 +205,10 @@ def zoom_webhook():
     start_time_raw = obj.get("start_time", "")
     duration = obj.get("duration", 0)
 
-    # Determine if new event is Simulive
+    print(f"DEBUG new event: topic={topic} type={zoom_type} start={start_time_raw} duration={duration}")
+
     new_is_simulive = zoom_type in SIMULIVE_TYPES
 
-    # Determine event kind label
     if new_is_simulive:
         event_kind = "Webinar (Simulive)"
     elif event_type == "webinar.created":
@@ -208,7 +216,6 @@ def zoom_webhook():
     else:
         event_kind = "Meeting (Live)"
 
-    # Skip unrecognised types
     if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES | SIMULIVE_TYPES:
         return "Unrecognised webinar type — skipped", 200
     if event_type == "meeting.created" and zoom_type not in LIVE_MEETING_TYPES:
@@ -217,18 +224,16 @@ def zoom_webhook():
     if not start_time_raw or not duration:
         return "No time data", 200
 
-    # Convert to IST
     new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00")) + IST_OFFSET
 
     try:
         token = get_zoom_access_token()
-
-        # Always fetch host email directly from Zoom API
         host_email = get_host_email(token, event_id, event_type)
-
+        print(f"DEBUG host_email={host_email}")
         existing = get_all_scheduled_events(token, host_email)
         conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
     except Exception as e:
+        print(f"ERROR: {e}")
         return f"Zoom API error: {e}", 500
 
     if conflicts:
