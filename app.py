@@ -1,0 +1,203 @@
+import json
+import os
+import hmac
+import hashlib
+import httpx
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+ZOOM_SECRET_TOKEN = os.environ.get("ZOOM_SECRET_TOKEN", "")
+ZOOM_ACCOUNT_ID = os.environ.get("ZOOM_ACCOUNT_ID", "")
+ZOOM_CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID", "")
+ZOOM_CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET", "")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+SIMULIVE_TYPES = {9}
+LIVE_WEBINAR_TYPES = {5, 6}
+LIVE_MEETING_TYPES = {2, 3, 8}
+
+
+def get_zoom_access_token():
+    resp = httpx.post(
+        "https://zoom.us/oauth/token",
+        params={"grant_type": "account_credentials", "account_id": ZOOM_ACCOUNT_ID},
+        auth=(ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET),
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def get_all_scheduled_events(token, host_email):
+    headers = {"Authorization": f"Bearer {token}"}
+    events = []
+
+    resp = httpx.get(
+        f"https://api.zoom.us/v2/users/{host_email}/meetings",
+        headers=headers,
+        params={"type": "scheduled", "page_size": 100},
+    )
+    if resp.status_code == 200:
+        for m in resp.json().get("meetings", []):
+            if m.get("start_time") and m.get("duration"):
+                events.append({
+                    "id": m["id"],
+                    "topic": m["topic"],
+                    "type": "Meeting",
+                    "start": datetime.fromisoformat(m["start_time"].replace("Z", "+00:00")),
+                    "duration_mins": m["duration"],
+                })
+
+    resp = httpx.get(
+        f"https://api.zoom.us/v2/users/{host_email}/webinars",
+        headers=headers,
+        params={"page_size": 100},
+    )
+    if resp.status_code == 200:
+        for w in resp.json().get("webinars", []):
+            if w.get("start_time") and w.get("duration"):
+                events.append({
+                    "id": w["id"],
+                    "topic": w["topic"],
+                    "type": "Webinar",
+                    "start": datetime.fromisoformat(w["start_time"].replace("Z", "+00:00")),
+                    "duration_mins": w["duration"],
+                })
+
+    return events
+
+
+def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id):
+    new_end = new_start + timedelta(minutes=new_duration_mins)
+    conflicts = []
+    for ev in existing_events:
+        if str(ev["id"]) == str(new_event_id):
+            continue
+        ev_end = ev["start"] + timedelta(minutes=ev["duration_mins"])
+        if new_start < ev_end and new_end > ev["start"]:
+            conflicts.append(ev)
+    return conflicts
+
+
+def post_slack_alert(new_event, conflicts):
+    conflict_lines = "\n".join(
+        f"  • *{c['topic']}* ({c['type']}) — "
+        f"{c['start'].strftime('%d %b %Y, %I:%M %p UTC')} "
+        f"for {c['duration_mins']} mins"
+        for c in conflicts
+    )
+    message = {
+        "text": "🚨 Zoom Scheduling Conflict Detected!",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "🚨 Zoom Scheduling Conflict Detected!"},
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*New Event:* {new_event['topic']}\n"
+                        f"*Type:* {new_event['event_kind']} (Live)\n"
+                        f"*Host:* {new_event['host_email']}\n"
+                        f"*Scheduled:* {new_event['start_time_fmt']} for {new_event['duration']} mins"
+                    ),
+                },
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Conflicts with:*\n{conflict_lines}",
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": "Please reschedule to avoid overlap."}
+                ],
+            },
+        ],
+    }
+    httpx.post(SLACK_WEBHOOK_URL, json=message)
+
+
+def verify_zoom_signature(body_bytes, timestamp, signature):
+    message = f"v0:{timestamp}:{body_bytes.decode()}"
+    expected = "v0=" + hmac.new(
+        ZOOM_SECRET_TOKEN.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.route("/api/zoom_webhook", methods=["POST"])
+def zoom_webhook():
+    body_bytes = request.get_data()
+
+    try:
+        payload = json.loads(body_bytes)
+    except Exception:
+        return "Invalid JSON", 400
+
+    if payload.get("event") == "endpoint.url_validation":
+        plain_token = payload["payload"]["plainToken"]
+        encrypted = hmac.new(
+            ZOOM_SECRET_TOKEN.encode(), plain_token.encode(), hashlib.sha256
+        ).hexdigest()
+        return jsonify({"plainToken": plain_token, "encryptedToken": encrypted})
+
+    timestamp = request.headers.get("x-zm-request-timestamp", "")
+    signature = request.headers.get("x-zm-signature", "")
+    if not verify_zoom_signature(body_bytes, timestamp, signature):
+        return "Unauthorized", 401
+
+    event_type = payload.get("event", "")
+    if event_type not in ("webinar.created", "meeting.created"):
+        return "Ignored", 200
+
+    obj = payload.get("payload", {}).get("object", {})
+    zoom_type = obj.get("type", 0)
+    host_email = obj.get("host_email", "")
+    topic = obj.get("topic", "Unknown")
+    event_id = obj.get("id")
+    start_time_raw = obj.get("start_time", "")
+    duration = obj.get("duration", 0)
+
+    if zoom_type in SIMULIVE_TYPES:
+        return "Simulive — skipped", 200
+
+    if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES:
+        return "Not a live webinar — skipped", 200
+    if event_type == "meeting.created" and zoom_type not in LIVE_MEETING_TYPES:
+        return "Not a live meeting — skipped", 200
+
+    if not start_time_raw or not duration:
+        return "No time data", 200
+
+    new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00"))
+    event_kind = "Webinar" if event_type == "webinar.created" else "Meeting"
+
+    try:
+        token = get_zoom_access_token()
+        existing = get_all_scheduled_events(token, host_email)
+        conflicts = find_conflicts(new_start, duration, existing, event_id)
+    except Exception as e:
+        return f"Zoom API error: {e}", 500
+
+    if conflicts:
+        post_slack_alert({
+            "topic": topic,
+            "event_kind": event_kind,
+            "host_email": host_email,
+            "start_time_fmt": new_start.strftime("%d %b %Y, %I:%M %p UTC"),
+            "duration": duration,
+        }, conflicts)
+
+    return "OK", 200
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
