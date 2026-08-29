@@ -1,1 +1,5 @@
-{}
+{
+  "rewrites": [
+    { "source": "/api/zoom_webhook", "destination": "/api/zoom_webhook.py" }
+  ]
+}
