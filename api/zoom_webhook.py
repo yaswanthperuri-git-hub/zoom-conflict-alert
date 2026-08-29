@@ -1,17 +1,16 @@
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import hmac
 import hashlib
 import httpx
 from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler
 
-
-ZOOM_SECRET_TOKEN = os.environ["ZOOM_SECRET_TOKEN"]
-ZOOM_ACCOUNT_ID = os.environ["ZOOM_ACCOUNT_ID"]
-ZOOM_CLIENT_ID = os.environ["ZOOM_CLIENT_ID"]
-ZOOM_CLIENT_SECRET = os.environ["ZOOM_CLIENT_SECRET"]
-SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
+ZOOM_SECRET_TOKEN = os.environ.get("ZOOM_SECRET_TOKEN", "")
+ZOOM_ACCOUNT_ID = os.environ.get("ZOOM_ACCOUNT_ID", "")
+ZOOM_CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID", "")
+ZOOM_CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET", "")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 SIMULIVE_TYPES = {9}
 LIVE_WEBINAR_TYPES = {5, 6}
