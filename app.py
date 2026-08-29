@@ -17,6 +17,7 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 SIMULIVE_TYPES = {9}
 LIVE_WEBINAR_TYPES = {5, 6}
 LIVE_MEETING_TYPES = {2, 3, 8}
+IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 def get_zoom_access_token():
@@ -49,7 +50,7 @@ def get_all_scheduled_events(token, host_email):
                     "type": "Meeting",
                     "zoom_type": m.get("type", 0),
                     "is_simulive": m.get("type", 0) in SIMULIVE_TYPES,
-                    "start": datetime.fromisoformat(m["start_time"].replace("Z", "+00:00")),
+                    "start": datetime.fromisoformat(m["start_time"].replace("Z", "+00:00")) + IST_OFFSET,
                     "duration_mins": m["duration"],
                 })
 
@@ -67,7 +68,7 @@ def get_all_scheduled_events(token, host_email):
                     "type": "Webinar",
                     "zoom_type": w.get("type", 0),
                     "is_simulive": w.get("type", 0) in SIMULIVE_TYPES,
-                    "start": datetime.fromisoformat(w["start_time"].replace("Z", "+00:00")),
+                    "start": datetime.fromisoformat(w["start_time"].replace("Z", "+00:00")) + IST_OFFSET,
                     "duration_mins": w["duration"],
                 })
 
@@ -95,7 +96,7 @@ def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, 
 def post_slack_alert(new_event, conflicts):
     conflict_lines = "\n".join(
         f"  • *{c['topic']}* ({c['type']}) — "
-        f"{c['start'].strftime('%d %b %Y, %I:%M %p UTC')} "
+        f"{c['start'].strftime('%d %b %Y, %I:%M %p IST')} "
         f"for {c['duration_mins']} mins"
         for c in conflicts
     )
@@ -198,7 +199,8 @@ def zoom_webhook():
     if not start_time_raw or not duration:
         return "No time data", 200
 
-    new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00"))
+    # Convert to IST
+    new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00")) + IST_OFFSET
 
     try:
         token = get_zoom_access_token()
@@ -212,7 +214,7 @@ def zoom_webhook():
             "topic": topic,
             "event_kind": event_kind,
             "host_email": host_email,
-            "start_time_fmt": new_start.strftime("%d %b %Y, %I:%M %p UTC"),
+            "start_time_fmt": new_start.strftime("%d %b %Y, %I:%M %p IST"),
             "duration": duration,
         }, conflicts)
 
