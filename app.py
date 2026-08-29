@@ -31,15 +31,22 @@ def get_zoom_access_token():
 
 
 def get_host_email(token, event_id, event_type):
-    """Fetch host email directly from meeting/webinar details."""
+    """Fetch host email directly from meeting/webinar details API."""
     headers = {"Authorization": f"Bearer {token}"}
     if event_type == "webinar.created":
-        resp = httpx.get(f"https://api.zoom.us/v2/webinars/{event_id}", headers=headers)
+        resp = httpx.get(
+            f"https://api.zoom.us/v2/webinars/{event_id}",
+            headers=headers
+        )
     else:
-        resp = httpx.get(f"https://api.zoom.us/v2/meetings/{event_id}", headers=headers)
+        resp = httpx.get(
+            f"https://api.zoom.us/v2/meetings/{event_id}",
+            headers=headers
+        )
     if resp.status_code == 200:
-        return resp.json().get("host_email", "")
-    return ""
+        data = resp.json()
+        return data.get("host_email", "") or data.get("host_id", "")
+    return "Unknown"
 
 
 def get_all_scheduled_events(token, host_email):
@@ -216,9 +223,8 @@ def zoom_webhook():
     try:
         token = get_zoom_access_token()
 
-        # Fetch host email if missing from payload
-        if not host_email or not host_email.strip():
-            host_email = get_host_email(token, event_id, event_type)
+        # Always fetch host email directly from Zoom API
+        host_email = get_host_email(token, event_id, event_type)
 
         existing = get_all_scheduled_events(token, host_email)
         conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
