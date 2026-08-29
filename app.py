@@ -33,7 +33,6 @@ def get_all_scheduled_events(token, host_email):
     headers = {"Authorization": f"Bearer {token}"}
     events = []
 
-    # Use host_email if available, otherwise fall back to "me"
     user_id = host_email if host_email and host_email.strip() else "me"
 
     resp = httpx.get(
@@ -48,6 +47,8 @@ def get_all_scheduled_events(token, host_email):
                     "id": m["id"],
                     "topic": m["topic"],
                     "type": "Meeting",
+                    "zoom_type": m.get("type", 0),
+                    "is_simulive": m.get("type", 0) in SIMULIVE_TYPES,
                     "start": datetime.fromisoformat(m["start_time"].replace("Z", "+00:00")),
                     "duration_mins": m["duration"],
                 })
@@ -64,6 +65,8 @@ def get_all_scheduled_events(token, host_email):
                     "id": w["id"],
                     "topic": w["topic"],
                     "type": "Webinar",
+                    "zoom_type": w.get("type", 0),
+                    "is_simulive": w.get("type", 0) in SIMULIVE_TYPES,
                     "start": datetime.fromisoformat(w["start_time"].replace("Z", "+00:00")),
                     "duration_mins": w["duration"],
                 })
@@ -71,12 +74,18 @@ def get_all_scheduled_events(token, host_email):
     return events
 
 
-def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id):
+def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, new_is_simulive):
     new_end = new_start + timedelta(minutes=new_duration_mins)
     conflicts = []
     for ev in existing_events:
         if str(ev["id"]) == str(new_event_id):
             continue
+
+        # Only ignore if BOTH new and existing are Simulive
+        # Zoom allows up to 3 simultaneous Simulive webinars
+        if new_is_simulive and ev.get("is_simulive"):
+            continue
+
         ev_end = ev["start"] + timedelta(minutes=ev["duration_mins"])
         if new_start < ev_end and new_end > ev["start"]:
             conflicts.append(ev)
@@ -103,7 +112,7 @@ def post_slack_alert(new_event, conflicts):
                     "type": "mrkdwn",
                     "text": (
                         f"*New Event:* {new_event['topic']}\n"
-                        f"*Type:* {new_event['event_kind']} (Live)\n"
+                        f"*Type:* {new_event['event_kind']}\n"
                         f"*Host:* {new_event['host_email']}\n"
                         f"*Scheduled:* {new_event['start_time_fmt']} for {new_event['duration']} mins"
                     ),
@@ -169,24 +178,32 @@ def zoom_webhook():
     start_time_raw = obj.get("start_time", "")
     duration = obj.get("duration", 0)
 
-    if zoom_type in SIMULIVE_TYPES:
-        return "Simulive — skipped", 200
+    # Determine if new event is Simulive
+    new_is_simulive = zoom_type in SIMULIVE_TYPES
 
-    if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES:
-        return "Not a live webinar — skipped", 200
+    # Determine event kind label
+    if new_is_simulive:
+        event_kind = "Webinar (Simulive)"
+    elif event_type == "webinar.created":
+        event_kind = "Webinar (Live)"
+    else:
+        event_kind = "Meeting (Live)"
+
+    # Skip unrecognised types
+    if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES | SIMULIVE_TYPES:
+        return "Unrecognised webinar type — skipped", 200
     if event_type == "meeting.created" and zoom_type not in LIVE_MEETING_TYPES:
-        return "Not a live meeting — skipped", 200
+        return "Unrecognised meeting type — skipped", 200
 
     if not start_time_raw or not duration:
         return "No time data", 200
 
     new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00"))
-    event_kind = "Webinar" if event_type == "webinar.created" else "Meeting"
 
     try:
         token = get_zoom_access_token()
         existing = get_all_scheduled_events(token, host_email)
-        conflicts = find_conflicts(new_start, duration, existing, event_id)
+        conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
     except Exception as e:
         return f"Zoom API error: {e}", 500
 
