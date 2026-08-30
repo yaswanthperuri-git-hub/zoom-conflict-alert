@@ -31,14 +31,18 @@ def get_zoom_access_token():
 
 
 def get_webinar_actual_type(token, webinar_id):
-    """Get the real type of a webinar from individual API — list API is unreliable for Simulive."""
+    """Get real type — Zoom API returns type=5 for Simulive too, so check is_simulive field."""
     headers = {"Authorization": f"Bearer {token}"}
     resp = httpx.get(f"https://api.zoom.us/v2/webinars/{webinar_id}", headers=headers)
     if resp.status_code == 200:
-        actual_type = resp.json().get("type", 5)
-        print(f"  DEBUG webinar {webinar_id} actual type={actual_type}")
+        data = resp.json()
+        is_simulive = data.get("is_simulive", False)
+        actual_type = data.get("type", 5)
+        print(f"  DEBUG webinar {webinar_id} type={actual_type} is_simulive={is_simulive}")
+        if is_simulive:
+            return 9  # force Simulive type
         return actual_type
-    return 5  # default to Live if can't fetch
+    return 5
 
 
 def get_host_email(token, event_id, event_type):
@@ -79,7 +83,7 @@ def get_all_scheduled_events(token, host_email):
                 "topic": m["topic"],
                 "type": "Meeting",
                 "zoom_type": m.get("type", 0),
-                "is_simulive": m.get("type", 0) in SIMULIVE_TYPES,
+                "is_simulive": False,
                 "start": start_dt + IST_OFFSET,
                 "duration_mins": m["duration"],
             })
@@ -108,7 +112,7 @@ def get_all_scheduled_events(token, host_email):
             if start_dt < now:
                 continue
 
-            # Verify actual type from individual API
+            # Verify actual type using is_simulive field
             actual_type = get_webinar_actual_type(token, w["id"])
             is_simulive = actual_type in SIMULIVE_TYPES
 
@@ -241,7 +245,7 @@ def zoom_webhook():
     try:
         token = get_zoom_access_token()
 
-        # Always verify type from API for webinars
+        # Always verify type from API for webinars using is_simulive field
         if event_type == "webinar.created":
             zoom_type = get_webinar_actual_type(token, event_id)
             print(f"DEBUG verified zoom_type={zoom_type}")
