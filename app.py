@@ -42,6 +42,18 @@ def get_host_email(token, event_id, event_type):
     return "Unknown"
 
 
+def get_webinar_type(token, event_id):
+    """Fetch the actual webinar type directly from Zoom API."""
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = httpx.get(f"https://api.zoom.us/v2/webinars/{event_id}", headers=headers)
+    if resp.status_code == 200:
+        data = resp.json()
+        actual_type = data.get("type", 0)
+        print(f"DEBUG webinar API type={actual_type} for event_id={event_id}")
+        return actual_type
+    return 0
+
+
 def get_all_scheduled_events(token, host_email):
     headers = {"Authorization": f"Bearer {token}"}
     events = []
@@ -88,7 +100,6 @@ def get_all_scheduled_events(token, host_email):
             break
 
         data = resp.json()
-        has_upcoming = False
 
         for w in data.get("webinars", []):
             start_raw = w.get("start_time", "")
@@ -96,8 +107,7 @@ def get_all_scheduled_events(token, host_email):
                 continue
             start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
             if start_dt < now:
-                continue  # skip past webinars
-            has_upcoming = True
+                continue
             events.append({
                 "id": w["id"],
                 "topic": w["topic"],
@@ -114,7 +124,7 @@ def get_all_scheduled_events(token, host_email):
 
     print(f"DEBUG total upcoming events fetched: {len(events)}")
     for ev in events:
-        print(f"  - {ev['topic']} | type={ev['zoom_type']} | start={ev['start']} | simulive={ev['is_simulive']}")
+        print(f"  - {ev['topic']} | zoom_type={ev['zoom_type']} | is_simulive={ev['is_simulive']} | start={ev['start']}")
     return events
 
 
@@ -125,9 +135,12 @@ def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, 
         if str(ev["id"]) == str(new_event_id):
             continue
         if new_is_simulive and ev.get("is_simulive"):
+            print(f"  SKIP simulive+simulive: {ev['topic']}")
             continue
         ev_end = ev["start"] + timedelta(minutes=ev["duration_mins"])
-        if new_start < ev_end and new_end > ev["start"]:
+        overlaps = new_start < ev_end and new_end > ev["start"]
+        print(f"  CHECK {ev['topic']} | simulive={ev['is_simulive']} | overlap={overlaps}")
+        if overlaps:
             conflicts.append(ev)
     print(f"DEBUG conflicts found: {len(conflicts)}")
     return conflicts
@@ -219,7 +232,20 @@ def zoom_webhook():
     start_time_raw = obj.get("start_time", "")
     duration = obj.get("duration", 0)
 
+    print(f"DEBUG webhook payload → topic={topic} zoom_type={zoom_type} event_type={event_type}")
+
+    # For webinars, always verify type directly from Zoom API
+    # because webhook payload type can be unreliable for Simulive
+    if event_type == "webinar.created":
+        try:
+            token_check = get_zoom_access_token()
+            zoom_type = get_webinar_type(token_check, event_id)
+            print(f"DEBUG verified zoom_type from API = {zoom_type}")
+        except Exception as e:
+            print(f"DEBUG could not verify type: {e}")
+
     new_is_simulive = zoom_type in SIMULIVE_TYPES
+    print(f"DEBUG new_is_simulive={new_is_simulive}")
 
     if new_is_simulive:
         event_kind = "Webinar (Simulive)"
