@@ -40,7 +40,7 @@ def get_webinar_actual_type(token, webinar_id):
         actual_type = data.get("type", 5)
         print(f"  DEBUG webinar {webinar_id} type={actual_type} is_simulive={is_simulive}")
         if is_simulive:
-            return 9  # force Simulive type
+            return 9
         return actual_type
     return 5
 
@@ -112,7 +112,6 @@ def get_all_scheduled_events(token, host_email):
             if start_dt < now:
                 continue
 
-            # Verify actual type using is_simulive field
             actual_type = get_webinar_actual_type(token, w["id"])
             is_simulive = actual_type in SIMULIVE_TYPES
 
@@ -156,13 +155,29 @@ def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, 
 
 def post_slack_alert(new_event, conflicts):
     conflict_lines = "\n".join(
-        f"  • *{c['topic']}* ({c['type']}) — "
+        f"  • *{c['topic']}* ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) — "
         f"{c['start'].strftime('%d %b %Y, %I:%M %p IST')} "
         f"for {c['duration_mins']} mins"
         for c in conflicts
     )
+
+    plain_text = (
+        f"@here 🚨 Zoom Scheduling Conflict Detected!\n"
+        f"New Event: {new_event['topic']}\n"
+        f"Type: {new_event['event_kind']}\n"
+        f"Host: {new_event['host_email']}\n"
+        f"Scheduled: {new_event['start_time_fmt']} for {new_event['duration']} mins\n"
+        f"Conflicts with:\n"
+        + "\n".join(
+            f"• {c['topic']} ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) — "
+            f"{c['start'].strftime('%d %b %Y, %I:%M %p IST')} for {c['duration_mins']} mins"
+            for c in conflicts
+        )
+        + f"\nPlease reschedule to avoid the overlap."
+    )
+
     message = {
-        "text": "🚨 Zoom Scheduling Conflict Detected!",
+        "text": plain_text,
         "blocks": [
             {
                 "type": "header",
@@ -173,6 +188,7 @@ def post_slack_alert(new_event, conflicts):
                 "text": {
                     "type": "mrkdwn",
                     "text": (
+                        f"<!here>\n"
                         f"*New Event:* {new_event['topic']}\n"
                         f"*Type:* {new_event['event_kind']}\n"
                         f"*Host:* {new_event['host_email']}\n"
@@ -191,7 +207,7 @@ def post_slack_alert(new_event, conflicts):
             {
                 "type": "context",
                 "elements": [
-                    {"type": "mrkdwn", "text": "Please reschedule to avoid overlap."}
+                    {"type": "mrkdwn", "text": "Please reschedule to avoid the overlap."}
                 ],
             },
         ],
@@ -245,7 +261,6 @@ def zoom_webhook():
     try:
         token = get_zoom_access_token()
 
-        # Always verify type from API for webinars using is_simulive field
         if event_type == "webinar.created":
             zoom_type = get_webinar_actual_type(token, event_id)
             print(f"DEBUG verified zoom_type={zoom_type}")
