@@ -30,6 +30,17 @@ def get_zoom_access_token():
     return resp.json()["access_token"]
 
 
+def get_webinar_actual_type(token, webinar_id):
+    """Get the real type of a webinar from individual API — list API is unreliable for Simulive."""
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = httpx.get(f"https://api.zoom.us/v2/webinars/{webinar_id}", headers=headers)
+    if resp.status_code == 200:
+        actual_type = resp.json().get("type", 5)
+        print(f"  DEBUG webinar {webinar_id} actual type={actual_type}")
+        return actual_type
+    return 5  # default to Live if can't fetch
+
+
 def get_host_email(token, event_id, event_type):
     headers = {"Authorization": f"Bearer {token}"}
     if event_type == "webinar.created":
@@ -42,18 +53,6 @@ def get_host_email(token, event_id, event_type):
     return "Unknown"
 
 
-def get_webinar_type(token, event_id):
-    """Fetch the actual webinar type directly from Zoom API."""
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = httpx.get(f"https://api.zoom.us/v2/webinars/{event_id}", headers=headers)
-    if resp.status_code == 200:
-        data = resp.json()
-        actual_type = data.get("type", 0)
-        print(f"DEBUG webinar API type={actual_type} for event_id={event_id}")
-        return actual_type
-    return 0
-
-
 def get_all_scheduled_events(token, host_email):
     headers = {"Authorization": f"Bearer {token}"}
     events = []
@@ -61,7 +60,7 @@ def get_all_scheduled_events(token, host_email):
 
     user_id = host_email if host_email and host_email.strip() else "me"
 
-    # Fetch upcoming meetings only
+    # Fetch upcoming meetings
     resp = httpx.get(
         f"https://api.zoom.us/v2/users/{user_id}/meetings",
         headers=headers,
@@ -85,7 +84,7 @@ def get_all_scheduled_events(token, host_email):
                 "duration_mins": m["duration"],
             })
 
-    # Fetch webinars and filter upcoming only
+    # Fetch upcoming webinars and verify each one's actual type
     next_page_token = ""
     while True:
         params = {"page_size": 100}
@@ -108,12 +107,17 @@ def get_all_scheduled_events(token, host_email):
             start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
             if start_dt < now:
                 continue
+
+            # Verify actual type from individual API
+            actual_type = get_webinar_actual_type(token, w["id"])
+            is_simulive = actual_type in SIMULIVE_TYPES
+
             events.append({
                 "id": w["id"],
                 "topic": w["topic"],
                 "type": "Webinar",
-                "zoom_type": w.get("type", 0),
-                "is_simulive": w.get("type", 0) in SIMULIVE_TYPES,
+                "zoom_type": actual_type,
+                "is_simulive": is_simulive,
                 "start": start_dt + IST_OFFSET,
                 "duration_mins": w["duration"],
             })
@@ -122,9 +126,9 @@ def get_all_scheduled_events(token, host_email):
         if not next_page_token:
             break
 
-    print(f"DEBUG total upcoming events fetched: {len(events)}")
+    print(f"DEBUG total upcoming events: {len(events)}")
     for ev in events:
-        print(f"  - {ev['topic']} | zoom_type={ev['zoom_type']} | is_simulive={ev['is_simulive']} | start={ev['start']}")
+        print(f"  - {ev['topic']} | zoom_type={ev['zoom_type']} | is_simulive={ev['is_simulive']}")
     return events
 
 
@@ -232,17 +236,22 @@ def zoom_webhook():
     start_time_raw = obj.get("start_time", "")
     duration = obj.get("duration", 0)
 
-    print(f"DEBUG webhook payload → topic={topic} zoom_type={zoom_type} event_type={event_type}")
+    print(f"DEBUG webhook → topic={topic} zoom_type={zoom_type} event_type={event_type}")
 
-    # For webinars, always verify type directly from Zoom API
-    # because webhook payload type can be unreliable for Simulive
-    if event_type == "webinar.created":
-        try:
-            token_check = get_zoom_access_token()
-            zoom_type = get_webinar_type(token_check, event_id)
-            print(f"DEBUG verified zoom_type from API = {zoom_type}")
-        except Exception as e:
-            print(f"DEBUG could not verify type: {e}")
+    try:
+        token = get_zoom_access_token()
+
+        # Always verify type from API for webinars
+        if event_type == "webinar.created":
+            zoom_type = get_webinar_actual_type(token, event_id)
+            print(f"DEBUG verified zoom_type={zoom_type}")
+
+        host_email = get_host_email(token, event_id, event_type)
+        print(f"DEBUG host_email={host_email}")
+
+    except Exception as e:
+        print(f"ERROR fetching details: {e}")
+        return f"Zoom API error: {e}", 500
 
     new_is_simulive = zoom_type in SIMULIVE_TYPES
     print(f"DEBUG new_is_simulive={new_is_simulive}")
@@ -265,8 +274,6 @@ def zoom_webhook():
     new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00")) + IST_OFFSET
 
     try:
-        token = get_zoom_access_token()
-        host_email = get_host_email(token, event_id, event_type)
         existing = get_all_scheduled_events(token, host_email)
         conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
     except Exception as e:
