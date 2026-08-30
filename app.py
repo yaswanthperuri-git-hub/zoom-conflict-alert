@@ -31,7 +31,6 @@ def get_zoom_access_token():
 
 
 def get_webinar_actual_type(token, webinar_id):
-    """Get real type — Zoom API returns type=5 for Simulive too, so check is_simulive field."""
     headers = {"Authorization": f"Bearer {token}"}
     resp = httpx.get(f"https://api.zoom.us/v2/webinars/{webinar_id}", headers=headers)
     if resp.status_code == 200:
@@ -64,7 +63,6 @@ def get_all_scheduled_events(token, host_email):
 
     user_id = host_email if host_email and host_email.strip() else "me"
 
-    # Fetch upcoming meetings
     resp = httpx.get(
         f"https://api.zoom.us/v2/users/{user_id}/meetings",
         headers=headers,
@@ -88,7 +86,6 @@ def get_all_scheduled_events(token, host_email):
                 "duration_mins": m["duration"],
             })
 
-    # Fetch upcoming webinars and verify each one's actual type
     next_page_token = ""
     while True:
         params = {"page_size": 100}
@@ -155,7 +152,7 @@ def find_conflicts(new_start, new_duration_mins, existing_events, new_event_id, 
 
 def post_slack_alert(new_event, conflicts):
     conflict_lines = "\n".join(
-        f"  • *{c['topic']}* ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) — "
+        f"  • *{c['topic']}* ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) - "
         f"{c['start'].strftime('%d %b %Y, %I:%M %p IST')} "
         f"for {c['duration_mins']} mins"
         for c in conflicts
@@ -169,7 +166,7 @@ def post_slack_alert(new_event, conflicts):
         f"Scheduled: {new_event['start_time_fmt']} for {new_event['duration']} mins\n"
         f"Conflicts with:\n"
         + "\n".join(
-            f"• {c['topic']} ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) — "
+            f"• {c['topic']} ({c['type']} - {'Simulive' if c['is_simulive'] else 'Live'}) - "
             f"{c['start'].strftime('%d %b %Y, %I:%M %p IST')} for {c['duration_mins']} mins"
             for c in conflicts
         )
@@ -180,15 +177,17 @@ def post_slack_alert(new_event, conflicts):
         "text": plain_text,
         "blocks": [
             {
-                "type": "header",
-                "text": {"type": "plain_text", "text": "🚨 Zoom Scheduling Conflict Detected!"},
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<!here> 🚨 *Zoom Scheduling Conflict Detected!*",
+                },
             },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        f"<!here>\n"
                         f"*New Event:* {new_event['topic']}\n"
                         f"*Type:* {new_event['event_kind']}\n"
                         f"*Host:* {new_event['host_email']}\n"
