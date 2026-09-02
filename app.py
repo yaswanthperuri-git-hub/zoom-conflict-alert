@@ -13,11 +13,16 @@ ZOOM_ACCOUNT_ID = os.environ.get("ZOOM_ACCOUNT_ID", "")
 ZOOM_CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID", "")
 ZOOM_CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+QSTASH_URL = os.environ.get("QSTASH_URL", "")
+QSTASH_TOKEN = os.environ.get("QSTASH_TOKEN", "")
+QSTASH_CURRENT_SIGNING_KEY = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "")
+QSTASH_NEXT_SIGNING_KEY = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "")
 
 SIMULIVE_TYPES = {9}
 LIVE_WEBINAR_TYPES = {5, 6}
 LIVE_MEETING_TYPES = {2, 3, 8}
 IST_OFFSET = timedelta(hours=5, minutes=30)
+VERCEL_URL = os.environ.get("VERCEL_URL", "")
 
 
 def get_zoom_access_token():
@@ -222,6 +227,96 @@ def verify_zoom_signature(body_bytes, timestamp, signature):
     return hmac.compare_digest(expected, signature)
 
 
+def verify_qstash_signature(body_bytes, signature):
+    """Verify the request is from QStash."""
+    for key in [QSTASH_CURRENT_SIGNING_KEY, QSTASH_NEXT_SIGNING_KEY]:
+        mac = hmac.new(key.encode(), body_bytes, hashlib.sha256)
+        expected = "sha256=" + mac.hexdigest()
+        if hmac.compare_digest(expected, signature):
+            return True
+    return False
+
+
+def schedule_delayed_check(event_data):
+    """Send event to QStash with 10 minute delay."""
+    callback_url = f"https://zoom-conflict-alert.vercel.app/api/delayed_check"
+    resp = httpx.post(
+        f"{QSTASH_URL}/v2/publish/{callback_url}",
+        headers={
+            "Authorization": f"Bearer {QSTASH_TOKEN}",
+            "Upstash-Delay": "600s",
+            "Content-Type": "application/json",
+        },
+        content=json.dumps(event_data),
+    )
+    print(f"DEBUG QStash scheduled: {resp.status_code} {resp.text}")
+
+
+def process_event(event_data):
+    """Core logic - check conflicts and send Slack alert."""
+    event_type = event_data.get("event_type")
+    zoom_type = event_data.get("zoom_type", 0)
+    host_email = event_data.get("host_email", "")
+    topic = event_data.get("topic", "Unknown")
+    event_id = event_data.get("event_id")
+    start_time_raw = event_data.get("start_time_raw", "")
+    duration = event_data.get("duration", 0)
+
+    try:
+        token = get_zoom_access_token()
+
+        # Always verify type from API for webinars
+        if event_type == "webinar.created":
+            zoom_type = get_webinar_actual_type(token, event_id)
+            print(f"DEBUG verified zoom_type={zoom_type}")
+
+        host_email = get_host_email(token, event_id, event_type)
+        print(f"DEBUG host_email={host_email}")
+
+    except Exception as e:
+        print(f"ERROR fetching details: {e}")
+        return
+
+    new_is_simulive = zoom_type in SIMULIVE_TYPES
+    print(f"DEBUG new_is_simulive={new_is_simulive}")
+
+    if new_is_simulive:
+        event_kind = "Webinar (Simulive)"
+    elif event_type == "webinar.created":
+        event_kind = "Webinar (Live)"
+    else:
+        event_kind = "Meeting (Live)"
+
+    if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES | SIMULIVE_TYPES:
+        print("Unrecognised webinar type — skipped")
+        return
+    if event_type == "meeting.created" and zoom_type not in LIVE_MEETING_TYPES:
+        print("Unrecognised meeting type — skipped")
+        return
+
+    if not start_time_raw or not duration:
+        print("No time data")
+        return
+
+    new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00")) + IST_OFFSET
+
+    try:
+        existing = get_all_scheduled_events(token, host_email)
+        conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return
+
+    if conflicts:
+        post_slack_alert({
+            "topic": topic,
+            "event_kind": event_kind,
+            "host_email": host_email,
+            "start_time_fmt": new_start.strftime("%d %b %Y, %I:%M %p IST"),
+            "duration": duration,
+        }, conflicts)
+
+
 @app.route("/api/zoom_webhook", methods=["POST"])
 def zoom_webhook():
     body_bytes = request.get_data()
@@ -248,64 +343,41 @@ def zoom_webhook():
         return "Ignored", 200
 
     obj = payload.get("payload", {}).get("object", {})
-    zoom_type = obj.get("type", 0)
-    host_email = obj.get("host_email", "")
-    topic = obj.get("topic", "Unknown")
-    event_id = obj.get("id")
-    start_time_raw = obj.get("start_time", "")
-    duration = obj.get("duration", 0)
 
-    print(f"DEBUG webhook → topic={topic} zoom_type={zoom_type} event_type={event_type}")
+    event_data = {
+        "event_type": event_type,
+        "zoom_type": obj.get("type", 0),
+        "host_email": obj.get("host_email", ""),
+        "topic": obj.get("topic", "Unknown"),
+        "event_id": obj.get("id"),
+        "start_time_raw": obj.get("start_time", ""),
+        "duration": obj.get("duration", 0),
+    }
 
-    try:
-        token = get_zoom_access_token()
+    print(f"DEBUG webhook received → topic={event_data['topic']} scheduling 10min delay")
 
-        if event_type == "webinar.created":
-            zoom_type = get_webinar_actual_type(token, event_id)
-            print(f"DEBUG verified zoom_type={zoom_type}")
+    # Schedule delayed check via QStash
+    schedule_delayed_check(event_data)
 
-        host_email = get_host_email(token, event_id, event_type)
-        print(f"DEBUG host_email={host_email}")
+    return "Scheduled", 200
 
-    except Exception as e:
-        print(f"ERROR fetching details: {e}")
-        return f"Zoom API error: {e}", 500
 
-    new_is_simulive = zoom_type in SIMULIVE_TYPES
-    print(f"DEBUG new_is_simulive={new_is_simulive}")
+@app.route("/api/delayed_check", methods=["POST"])
+def delayed_check():
+    body_bytes = request.get_data()
 
-    if new_is_simulive:
-        event_kind = "Webinar (Simulive)"
-    elif event_type == "webinar.created":
-        event_kind = "Webinar (Live)"
-    else:
-        event_kind = "Meeting (Live)"
-
-    if event_type == "webinar.created" and zoom_type not in LIVE_WEBINAR_TYPES | SIMULIVE_TYPES:
-        return "Unrecognised webinar type — skipped", 200
-    if event_type == "meeting.created" and zoom_type not in LIVE_MEETING_TYPES:
-        return "Unrecognised meeting type — skipped", 200
-
-    if not start_time_raw or not duration:
-        return "No time data", 200
-
-    new_start = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00")) + IST_OFFSET
+    # Verify request is from QStash
+    signature = request.headers.get("Upstash-Signature", "")
+    if not verify_qstash_signature(body_bytes, signature):
+        return "Unauthorized", 401
 
     try:
-        existing = get_all_scheduled_events(token, host_email)
-        conflicts = find_conflicts(new_start, duration, existing, event_id, new_is_simulive)
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return f"Zoom API error: {e}", 500
+        event_data = json.loads(body_bytes)
+    except Exception:
+        return "Invalid JSON", 400
 
-    if conflicts:
-        post_slack_alert({
-            "topic": topic,
-            "event_kind": event_kind,
-            "host_email": host_email,
-            "start_time_fmt": new_start.strftime("%d %b %Y, %I:%M %p IST"),
-            "duration": duration,
-        }, conflicts)
+    print(f"DEBUG delayed check running for: {event_data.get('topic')}")
+    process_event(event_data)
 
     return "OK", 200
 
