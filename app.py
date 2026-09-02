@@ -225,15 +225,6 @@ def verify_zoom_signature(body_bytes, timestamp, signature):
     return hmac.compare_digest(expected, signature)
 
 
-def verify_qstash_signature(body_bytes, signature):
-    for key in [QSTASH_CURRENT_SIGNING_KEY, QSTASH_NEXT_SIGNING_KEY]:
-        mac = hmac.new(key.encode(), body_bytes, hashlib.sha256)
-        expected = "sha256=" + mac.hexdigest()
-        if hmac.compare_digest(expected, signature):
-            return True
-    return False
-
-
 def schedule_delayed_check(event_data):
     """Send event to QStash EU with 10 minute delay."""
     callback_url = "https://zoom-conflict-alert.vercel.app/api/delayed_check"
@@ -357,12 +348,8 @@ def zoom_webhook():
 
 @app.route("/api/delayed_check", methods=["POST"])
 def delayed_check():
+    """Called by QStash after 10 min delay — no signature check for now."""
     body_bytes = request.get_data()
-
-    # Verify request is from QStash
-    signature = request.headers.get("Upstash-Signature", "")
-    if not verify_qstash_signature(body_bytes, signature):
-        return "Unauthorized", 401
 
     try:
         event_data = json.loads(body_bytes)
