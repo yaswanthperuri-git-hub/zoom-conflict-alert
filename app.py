@@ -13,7 +13,6 @@ ZOOM_ACCOUNT_ID = os.environ.get("ZOOM_ACCOUNT_ID", "")
 ZOOM_CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID", "")
 ZOOM_CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET", "")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-QSTASH_URL = os.environ.get("QSTASH_URL", "")
 QSTASH_TOKEN = os.environ.get("QSTASH_TOKEN", "")
 QSTASH_CURRENT_SIGNING_KEY = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "")
 QSTASH_NEXT_SIGNING_KEY = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "")
@@ -22,7 +21,6 @@ SIMULIVE_TYPES = {9}
 LIVE_WEBINAR_TYPES = {5, 6}
 LIVE_MEETING_TYPES = {2, 3, 8}
 IST_OFFSET = timedelta(hours=5, minutes=30)
-VERCEL_URL = os.environ.get("VERCEL_URL", "")
 
 
 def get_zoom_access_token():
@@ -228,7 +226,6 @@ def verify_zoom_signature(body_bytes, timestamp, signature):
 
 
 def verify_qstash_signature(body_bytes, signature):
-    """Verify the request is from QStash."""
     for key in [QSTASH_CURRENT_SIGNING_KEY, QSTASH_NEXT_SIGNING_KEY]:
         mac = hmac.new(key.encode(), body_bytes, hashlib.sha256)
         expected = "sha256=" + mac.hexdigest()
@@ -239,9 +236,9 @@ def verify_qstash_signature(body_bytes, signature):
 
 def schedule_delayed_check(event_data):
     """Send event to QStash with 10 minute delay."""
-    callback_url = f"https://zoom-conflict-alert.vercel.app/api/delayed_check"
+    callback_url = "https://zoom-conflict-alert.vercel.app/api/delayed_check"
     resp = httpx.post(
-        f"{QSTASH_URL}/v2/publish/{callback_url}",
+        f"https://qstash.upstash.io/v2/publish/{callback_url}",
         headers={
             "Authorization": f"Bearer {QSTASH_TOKEN}",
             "Upstash-Delay": "600s",
@@ -256,7 +253,6 @@ def process_event(event_data):
     """Core logic - check conflicts and send Slack alert."""
     event_type = event_data.get("event_type")
     zoom_type = event_data.get("zoom_type", 0)
-    host_email = event_data.get("host_email", "")
     topic = event_data.get("topic", "Unknown")
     event_id = event_data.get("event_id")
     start_time_raw = event_data.get("start_time_raw", "")
@@ -265,7 +261,6 @@ def process_event(event_data):
     try:
         token = get_zoom_access_token()
 
-        # Always verify type from API for webinars
         if event_type == "webinar.created":
             zoom_type = get_webinar_actual_type(token, event_id)
             print(f"DEBUG verified zoom_type={zoom_type}")
@@ -355,8 +350,6 @@ def zoom_webhook():
     }
 
     print(f"DEBUG webhook received → topic={event_data['topic']} scheduling 10min delay")
-
-    # Schedule delayed check via QStash
     schedule_delayed_check(event_data)
 
     return "Scheduled", 200
