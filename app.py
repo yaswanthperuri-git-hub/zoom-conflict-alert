@@ -235,10 +235,10 @@ def verify_qstash_signature(body_bytes, signature):
 
 
 def schedule_delayed_check(event_data):
-    """Send event to QStash with 10 minute delay."""
+    """Send event to QStash EU with 10 minute delay."""
     callback_url = "https://zoom-conflict-alert.vercel.app/api/delayed_check"
     resp = httpx.post(
-        f"https://qstash.upstash.io/v2/publish/{callback_url}",
+        f"https://qstash-eu-central-1.upstash.io/v2/publish/{callback_url}",
         headers={
             "Authorization": f"Bearer {QSTASH_TOKEN}",
             "Upstash-Delay": "600s",
