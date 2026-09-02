@@ -9,6 +9,10 @@
     {
       "src": "/api/zoom_webhook",
       "dest": "app.py"
+    },
+    {
+      "src": "/api/delayed_check",
+      "dest": "app.py"
     }
   ]
 }
